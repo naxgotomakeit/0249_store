@@ -1,0 +1,113 @@
+classdef PlatformPredictionEdge < g2o.core.BaseBinaryEdge
+    % PlatformPredictionEdge
+    %
+    % This factor represents the process model which transforms the state
+    % from timestep k to k+1.
+    %
+    % State: x_k = [x; y; theta]
+    % Measurement: u_{k+1} (set by G2OSLAMSystem via obj.u)
+    %
+    % Define:
+    %   M(theta_k) = dT * [cos(theta) -sin(theta) 0;
+    %                      sin(theta)  cos(theta) 0;
+    %                      0           0          1];
+    %
+    % Process (noise-free mean):
+    %   x_{k+1} = x_k + M(theta_k) * u_{k+1}
+    %
+    % Error (residual):
+    %   e = inv(M(theta_k)) * (x_{k+1} - x_k) - u_{k+1}
+    %
+    % Convention:
+    %   vertex slot 1 contains x_k
+    %   vertex slot 2 contains x_{k+1}
+    properties(Access = protected)
+        % The length of the time step
+        dT;
+    end
+    methods(Access = public)
+        function obj = PlatformPredictionEdge(dT)
+            % PlatformPredictionEdge constructor
+            assert(dT >= 0);
+            obj = obj@g2o.core.BaseBinaryEdge(3);
+            obj.dT = dT;
+        end
+        function initialEstimate(obj)
+            % INITIALESTIMATE Compute the initial estimate of x_(k+1)
+            % given x_k and measurement u_(k+1)
+            x1 = obj.edgeVertices{1}.x;   % x_k
+            u  = obj.measurement;         % u_{k+1}
+            theta = x1(3);
+            c = cos(theta);
+            s = sin(theta);
+            % M(theta_k)
+            M = obj.dT * [ c, -s, 0;
+                           s,  c, 0;
+                           0,  0, 1 ];
+            x2 = x1 + M * u;
+            % Wrap heading to (-pi, pi]
+            x2(3) = mod(x2(3) + pi, 2*pi) - pi;
+            obj.edgeVertices{2}.x = x2;
+        end
+        function computeError(obj)
+            % COMPUTEERROR Compute residual:
+            % e = inv(M)*(x2-x1) - u
+            x1 = obj.edgeVertices{1}.x;
+            x2 = obj.edgeVertices{2}.x;
+            u  = obj.measurement;
+            theta = x1(3);
+            c = cos(theta);
+            s = sin(theta);
+            if obj.dT <= 0
+                invM = eye(3);
+            else
+                % inv(M) = (1/dT) * R(theta)^T
+                invM = (1/obj.dT) * [  c,  s, 0;
+                                     -s,  c, 0;
+                                      0,  0, 1 ];
+            end
+            dx = x2 - x1;
+            dx(3) = mod(dx(3) + pi, 2*pi) - pi;   % wrap angle difference first
+            e = invM * dx - u;                    % now e(3) is angular-rate residual, no wrap
+           
+            obj.errorZ = e;
+        end
+        function linearizeOplus(obj)
+            % LINEARIZEOPLUS Compute Jacobians wrt x1 and x2
+            %
+            % e = invM(theta1) * (x2 - x1) - u
+            %
+            % J2 = invM
+            % J1 = -invM + (d(invM)/dtheta1 * (x2-x1)) in column 3 only
+            x1 = obj.edgeVertices{1}.x;
+            x2 = obj.edgeVertices{2}.x;
+            theta = x1(3);
+            c = cos(theta);
+            s = sin(theta);
+            if obj.dT <= 0
+                invM = eye(3);
+                dInvMdTheta = zeros(3);
+            else
+                invM = (1/obj.dT) * [  c,  s, 0;
+                                     -s,  c, 0;
+                                      0,  0, 1 ];
+                % d/dtheta of invM = (1/dT) * d/dtheta(R^T)
+                % R^T = [ c  s; -s c]
+                % d(R^T)/dtheta = [ -s  c; -c -s]
+                dInvMdTheta = (1/obj.dT) * [ -s,  c, 0;
+                                             -c, -s, 0;
+                                              0,  0, 0 ];
+            end
+            
+            
+            dx = (x2 - x1);
+            dx(3) = mod(dx(3) + pi, 2*pi) - pi;   % keep consistent with computeError
+            extraCol3 = dInvMdTheta * dx;
+            J1 = -invM;
+            J1(:,3) = J1(:,3) + extraCol3;
+            J2 = invM;
+            obj.J{1} = J1;
+            obj.J{2} = J2;
+        end
+    end
+end
